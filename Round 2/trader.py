@@ -578,8 +578,12 @@ class Trader:
         τ     = self.params[Product.SPREAD]["edge_threshold"]    # e.g. 10 ticks
         P_MAX = self.params[Product.SPREAD]["target_position"]   # e.g. 58 lots
 
-        raw_qty = edge / τ                     # e.g. edge = –27 → –2.7
-        target  = int(np.clip(raw_qty, -1, 1) * P_MAX)
+        if edge >  τ:            # basket rich  → SHORT basket, LONG legs
+            target = -P_MAX
+        elif edge < -τ:          # basket cheap → LONG basket, SHORT legs
+            target =  P_MAX
+        else:
+            target = 0
 
         # ──────────────────────────────────────────────────────────────────────────
         # 3. Fire orders if we need to move toward the target
