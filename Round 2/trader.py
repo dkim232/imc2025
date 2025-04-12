@@ -8,20 +8,19 @@ import math
 
 def target_pos_from_edge(edge: float, tau: int, p_max: int) -> int:
     """
-    Piece‑wise linear:
-        |edge| ≤ τ        → 0
-        τ < |edge| < 3τ   → linearly 0 … p_max
-        |edge| ≥ 3τ       → ±p_max
+    |edge| ≤ τ        → 0
+    τ < |edge| < 3τ   → linearly 0 … p_max
+    |edge| ≥ 3τ       → ±p_max
     """
-    sgn = np.sign(edge)
-    mag = abs(edge)
+    sign = np.sign(edge)
+    mag  = abs(edge)
     if mag <= tau:
         return 0
     elif mag >= 3 * tau:
-        return int(sgn * p_max)
+        return int(sign * p_max)
     else:
-        return int(sgn * p_max * (mag - tau) / (2 * tau))
-    
+        return int(sign * p_max * (mag - tau) / (2 * tau))
+
 class Logger:
     def __init__(self) -> None:
         self.logs = ""
@@ -176,10 +175,8 @@ class Trader:
             Product.STRAWBERRIES: 250,
             Product.ROSES: 60
         }
-        self.meta = {           # one basket only, so a tiny dict is fine
-        "entry_ts": None,   # timestamp when position opened
-        "entry_edge": None  # edge at entry
-        }
+        self.meta = {"entry_ts": None, "entry_edge": None}
+
 
     # Returns buy_order_volume, sell_order_volume
     def take_best_orders(
@@ -526,10 +523,7 @@ class Trader:
 
         return component_orders
 
-    def execute_spread_orders(self, target_position: int, basket_position: int,
-                          order_depths: Dict[str, OrderDepth],
-                          state: TradingState, spread: float):
-
+    def execute_spread_orders(self, target_position: int, basket_position: int, order_depths: Dict[str, OrderDepth]):
 
         if target_position == basket_position:
             return None
@@ -553,10 +547,6 @@ class Trader:
 
             aggregate_orders = self.convert_synthetic_basket_orders(synthetic_orders, order_depths)
             aggregate_orders[Product.GIFT_BASKET] = basket_orders
-            # ---- remember entry details so we can time‑stop / half‑mean exit --------
-            self.meta["entry_ts"]   = state.timestamp      # pass 'state' in args, see step 4
-            self.meta["entry_edge"] = spread               # idem
-
             return aggregate_orders
 
         else:
@@ -574,10 +564,6 @@ class Trader:
 
             aggregate_orders = self.convert_synthetic_basket_orders(synthetic_orders, order_depths)
             aggregate_orders[Product.GIFT_BASKET] = basket_orders
-            # ---- remember entry details so we can time‑stop / half‑mean exit --------
-            self.meta["entry_ts"]   = state.timestamp      # pass 'state' in args, see step 4
-            self.meta["entry_edge"] = spread               # idem
-
             return aggregate_orders
 
     def spread_orders(self, order_depths: Dict[str, OrderDepth], product: Product, basket_position: int,
@@ -591,17 +577,22 @@ class Trader:
         synthetic_swmid = self.get_swmid(synthetic_order_depth)
         spread = basket_swmid - synthetic_swmid
         spread_data["spread_history"].append(spread)
-        MAX_HOLD = 4_000                      # ≈ 40 seconds of sim time
-        if basket_position != 0 and self.meta["entry_ts"] is not None:
-            if state.timestamp - self.meta["entry_ts"] > MAX_HOLD:
-                return self.execute_spread_orders(target, basket_position,
-                                  order_depths, state, spread)
 
+        # -----------------------------------------------------------------
+        #  Early‑exit: time stop & half‑mean take‑profit
+        # -----------------------------------------------------------------
+        MAX_HOLD = 4_000                              # ≈ 40 sim seconds
+        if basket_position != 0:
+            # time‑stop
+            if self.meta["entry_ts"] is not None and \
+            state.timestamp - self.meta["entry_ts"] > MAX_HOLD:
+                return self.execute_spread_orders(0, basket_position, order_depths)
 
-        #  b) half‑mean take‑profit
-        if basket_position != 0 and self.meta["entry_edge"] is not None:
-            if abs(spread) < 0.5 * abs(self.meta["entry_edge"]):
-                return self.execute_spread_orders(target, basket_position, order_depths, state, spread)
+            # half‑mean take‑profit
+            if self.meta["entry_edge"] is not None and \
+            abs(spread) < 0.5 * abs(self.meta["entry_edge"]):
+                return self.execute_spread_orders(0, basket_position, order_depths)
+
 
         if len(spread_data["spread_history"]) < self.params[Product.SPREAD]["spread_std_window"]:
             return None
@@ -622,23 +613,19 @@ class Trader:
 
         tau   = self.params[Product.SPREAD]["zscore_threshold"]
         pmax  = self.params[Product.SPREAD]["target_position"]
-
         target = target_pos_from_edge(zscore, tau, pmax)
 
         if target != basket_position:
-            return self.execute_spread_orders(target, basket_position,
-                                  order_depths, state, spread)
+            # remember why we’re opening / flipping
+            if target != 0:                         # opening a position
+                self.meta["entry_ts"]   = state.timestamp
+                self.meta["entry_edge"] = spread
+            else:                                   # flattening
+                self.meta["entry_ts"]   = None
+                self.meta["entry_edge"] = None
 
+            return self.execute_spread_orders(target, basket_position, order_depths)
 
-        # if zscore >= self.params[Product.SPREAD]["zscore_threshold"]:
-        #     if basket_position != -self.params[Product.SPREAD]["target_position"]:
-        #         return self.execute_spread_orders(-self.params[Product.SPREAD]["target_position"], basket_position,
-        #                                           order_depths)
-
-        # if zscore <= -self.params[Product.SPREAD]["zscore_threshold"]:
-        #     if basket_position != self.params[Product.SPREAD]["target_position"]:
-        #         return self.execute_spread_orders(self.params[Product.SPREAD]["target_position"], basket_position,
-        #                                           order_depths)
 
             # if (zscore < 0 and spread_data["prev_zscore"] > 0) or (zscore > 0 and spread_data["prev_zscore"] < 0) or spread_data["clear_flag"]:
             #     if basket_position == 0:
