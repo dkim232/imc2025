@@ -131,12 +131,13 @@ class Product:
 
 PARAMS = {
     Product.SPREAD: {
-        "default_spread_mean": 10.50439988484237,
-        "default_spread_std": 50.07966,
+        "default_spread_mean": 7.50439988484237,
+        "default_spread_std": 20.07966,
         "spread_sma_window": 1500,
         "spread_std_window": 28,
         "zscore_threshold": 5,
         "target_position": 58,
+        "edge_threshold": 10,
     }
 }
 
@@ -548,55 +549,44 @@ class Trader:
             aggregate_orders[Product.GIFT_BASKET] = basket_orders
             return aggregate_orders
 
-    def spread_orders(self, order_depths: Dict[str, OrderDepth], product: Product, basket_position: int,
-                      spread_data: Dict[str, Any]):
-        if Product.GIFT_BASKET not in order_depths.keys():
+    def spread_orders(
+        self,
+        order_depths: Dict[str, OrderDepth],
+        product: Product,
+        basket_position: int,
+        spread_data: Dict[str, Any],        # ← kept so your traderData schema doesn’t break
+    ):
+        # ──────────────────────────────────────────────────────────────────────────
+        # 0. Guards
+        # ──────────────────────────────────────────────────────────────────────────
+        if Product.GIFT_BASKET not in order_depths:
             return None
 
-        basket_order_depth = order_depths[Product.GIFT_BASKET]
-        synthetic_order_depth = self.get_synthetic_basket_order_depth(order_depths)
-        basket_swmid = self.get_swmid(basket_order_depth)
-        synthetic_swmid = self.get_swmid(synthetic_order_depth)
-        spread = basket_swmid - synthetic_swmid
-        spread_data["spread_history"].append(spread)
+        # ──────────────────────────────────────────────────────────────────────────
+        # 1. Compute fair‑values and the raw mis‑pricing (“edge”)
+        # ──────────────────────────────────────────────────────────────────────────
+        basket_od     = order_depths[Product.GIFT_BASKET]
+        synthetic_od  = self.get_synthetic_basket_order_depth(order_depths)
 
-        if len(spread_data["spread_history"]) < self.params[Product.SPREAD]["spread_std_window"]:
-            return None
-        else:
-            spread_std = np.std(spread_data["spread_history"][-self.params[Product.SPREAD]["spread_std_window"]:])
+        basket_swmid    = self.get_swmid(basket_od)       # size‑weighted mid
+        synthetic_swmid = self.get_swmid(synthetic_od)
+        edge            = basket_swmid - synthetic_swmid  # negative → basket rich / overpriced
 
-        if len(spread_data['spread_history']) == self.params[Product.SPREAD]["spread_sma_window"]:
-            spread_mean = np.mean(spread_data['spread_history'])
-            spread_data['curr_mean'] = spread_mean
-        elif len(spread_data['spread_history']) > self.params[Product.SPREAD]["spread_sma_window"]:
-            spread_mean = spread_data['curr_mean'] + (
-                        (spread - spread_data['spread_history'][0]) / self.params[Product.SPREAD]["spread_sma_window"])
-            spread_data["spread_history"].pop(0)
-        else:
-            spread_mean = self.params[Product.SPREAD]["default_spread_mean"]
+        # ──────────────────────────────────────────────────────────────────────────
+        # 2. Decide our desired basket position
+        # ──────────────────────────────────────────────────────────────────────────
+        τ     = self.params[Product.SPREAD]["edge_threshold"]    # e.g. 10 ticks
+        P_MAX = self.params[Product.SPREAD]["target_position"]   # e.g. 58 lots
 
-        zscore = (spread - spread_mean) / spread_std
+        raw_qty = edge / τ                     # e.g. edge = –27 → –2.7
+        target  = int(np.clip(raw_qty, -1, 1) * P_MAX)
 
-        if zscore >= self.params[Product.SPREAD]["zscore_threshold"]:
-            if basket_position != -self.params[Product.SPREAD]["target_position"]:
-                return self.execute_spread_orders(-self.params[Product.SPREAD]["target_position"], basket_position,
-                                                  order_depths)
+        # ──────────────────────────────────────────────────────────────────────────
+        # 3. Fire orders if we need to move toward the target
+        # ──────────────────────────────────────────────────────────────────────────
+        if target != basket_position:
+            return self.execute_spread_orders(target, basket_position, order_depths)
 
-        if zscore <= -self.params[Product.SPREAD]["zscore_threshold"]:
-            if basket_position != self.params[Product.SPREAD]["target_position"]:
-                return self.execute_spread_orders(self.params[Product.SPREAD]["target_position"], basket_position,
-                                                  order_depths)
-
-            # if (zscore < 0 and spread_data["prev_zscore"] > 0) or (zscore > 0 and spread_data["prev_zscore"] < 0) or spread_data["clear_flag"]:
-            #     if basket_position == 0:
-            #         spread_data["clear_flag"] = False
-            #     else:
-            #         spread_data["clear_flag"] = True
-            #         return self.execute_spread_orders(0, basket_position, order_depths)
-
-        spread_data["prev_zscore"] = zscore
-        logger.print(spread_data["prev_zscore"])
-        logger.print(spread_mean)
         return None
 
     def run(self, state: TradingState):
@@ -614,7 +604,7 @@ class Trader:
                 "clear_flag": False,
                 "curr_avg": 0,
             }
-
+        logger.print(traderObject[Product.SPREAD]["curr_avg"])
         basket_position = state.position[Product.GIFT_BASKET] if Product.GIFT_BASKET in state.position else 0
         spread_orders = self.spread_orders(state.order_depths, Product.GIFT_BASKET, basket_position,
                                            traderObject[Product.SPREAD])
